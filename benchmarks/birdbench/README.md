@@ -47,3 +47,21 @@ see `resources_servers/bird_sql/README.md`.
 
 Standard text-to-SQL prompt in `prompts/default.yaml`: the model reasons
 step-by-step and returns the final SQL inside a ` ```sql ``` ` block.
+
+## Running on Ultra model
+
+```bash
+# Run servers
+export INFERENCE_KEY=<your-key>
+config_paths="responses_api_models/vllm_model/configs/vllm_model_ultra.yaml,\
+benchmarks/birdbench/config.yaml"
+ng_run "+config_paths=[$config_paths]"
+
+# Collect rollouts (num_repeats the same as for ultra vpr)
+ng_collect_rollouts \
+    +agent_name=birdbench_bird_sql_simple_agent \
+    +input_jsonl_fpath=benchmarks/birdbench/data/birdbench_benchmark.jsonl \
+    +output_jsonl_fpath=birdbench_results/birdbench_rollouts.jsonl \
+    +prompt_config=benchmarks/birdbench/prompts/default.yaml \
+    +num_repeats=3 
+```

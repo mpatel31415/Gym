@@ -1,0 +1,12 @@
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: https://inference-api.nvidia.com/v1
+      api_key: ${oc.env:INFERENCE_KEY}
+      model: nvidia/nvidia/evals-nemotron-ultra
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      default_headers:
+        X-Inference-Priority: batch
