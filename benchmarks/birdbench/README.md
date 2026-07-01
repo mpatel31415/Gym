@@ -59,9 +59,25 @@ ng_run "+config_paths=[$config_paths]"
 
 # Collect rollouts (num_repeats the same as for ultra vpr)
 ng_collect_rollouts \
-    +agent_name=birdbench_bird_sql_simple_agent \
+    +agent_name=birdbench_bird_sql_simple_agent \ 
     +input_jsonl_fpath=benchmarks/birdbench/data/birdbench_benchmark.jsonl \
     +output_jsonl_fpath=birdbench_results/birdbench_rollouts.jsonl \
     +prompt_config=benchmarks/birdbench/prompts/default.yaml \
-    +num_repeats=3 
+    +num_repeats=3 \
+    +num_samples_in_parallel=16 \
+    +resume_from_cache=true
+```
+
+# With params set 
+```bash
+ng_collect_rollouts \
+    +agent_name=birdbench_bird_sql_simple_agent \
+    +input_jsonl_fpath=benchmarks/birdbench/data/birdbench_benchmark.jsonl \
+    +output_jsonl_fpath=birdbench_results_t1_p095/birdbench_rollouts.jsonl \
+    +prompt_config=benchmarks/birdbench/prompts/default.yaml \
+    +num_repeats=3 \
+    +num_samples_in_parallel=32 \
+    +responses_create_params.temperature=1.0 \
+    +responses_create_params.top_p=0.95 \
+    +resume_from_cache=true
 ```
