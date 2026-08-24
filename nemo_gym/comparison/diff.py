@@ -20,22 +20,6 @@ from what the runs already recorded; for now nothing here estimates, tests, or j
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from nemo_gym.comparison.constants import (
-    ACROSS_REPEATS_MARKER,
-    CI_HIGH_95_ACROSS_REPEATS_PREFIX,
-    CI_LOW_95_ACROSS_REPEATS_PREFIX,
-    DISPERSION_PREFIXES,
-    FLIP_FIELD,
-    MEAN_ACROSS_REPEATS_PREFIX,
-    PASS_THRESHOLD,
-    ROLLOUT_INFOS_KEY_NAME,
-    SE_ACROSS_REPEATS_PREFIX,
-    STAT_SUFFIXES,
-    STD_ERR_ACROSS_RUNS_SUFFIX,
-    TASK_MAX_KEY,
-    TASK_MEAN_KEY,
-    TASK_MIN_KEY,
-)
 from nemo_gym.comparison.loading import LoadedRun
 from nemo_gym.comparison.schema import (
     AgentComparison,
@@ -46,7 +30,54 @@ from nemo_gym.comparison.schema import (
     TaskFlip,
 )
 from nemo_gym.config_types import ConfigError
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import (
+    ACROSS_REPEATS_MARKER,
+    CI_HIGH_95_ACROSS_REPEATS_PREFIX,
+    CI_HIGH_95_PREFIX,
+    CI_LOW_95_ACROSS_REPEATS_PREFIX,
+    CI_LOW_95_PREFIX,
+    MAX_PREFIX,
+    MEAN_ACROSS_REPEATS_PREFIX,
+    MEAN_PREFIX,
+    MEDIAN_PREFIX,
+    MIN_PREFIX,
+    P25_PREFIX,
+    P75_PREFIX,
+    REWARD_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    ROLLOUT_INFOS_KEY_NAME,
+    SE_ACROSS_REPEATS_PREFIX,
+    SEM_PREFIX,
+    STD_DEV_ACROSS_RUNS_SUFFIX,
+    STD_ERR_ACROSS_RUNS_SUFFIX,
+    STD_PREFIX,
+    TASK_INDEX_KEY_NAME,
+)
+
+
+# Dispersion companions of a `mean/<field>` metric. They are summary statistics of the same
+# underlying field, not metrics in their own right, so they never get their own row.
+DISPERSION_PREFIXES = (
+    MEDIAN_PREFIX,
+    STD_PREFIX,
+    MIN_PREFIX,
+    MAX_PREFIX,
+    P25_PREFIX,
+    P75_PREFIX,
+    SEM_PREFIX,
+    CI_LOW_95_PREFIX,
+    CI_HIGH_95_PREFIX,
+)
+# Companion statistics of the `pass@k` family, likewise not metrics of their own.
+STAT_SUFFIXES = (STD_DEV_ACROSS_RUNS_SUFFIX, STD_ERR_ACROSS_RUNS_SUFFIX)
+
+# The per-task field flips are computed from. Every verify response carries `reward` at minimum.
+FLIP_FIELD = REWARD_KEY_NAME
+TASK_MEAN_KEY = f"{MEAN_PREFIX}{FLIP_FIELD}"
+TASK_MIN_KEY = f"{MIN_PREFIX}{FLIP_FIELD}"
+TASK_MAX_KEY = f"{MAX_PREFIX}{FLIP_FIELD}"
+# A task "passes" when the majority of its repeats scored a pass.
+PASS_THRESHOLD = 0.5
 
 
 def _is_number(value: Any) -> bool:
