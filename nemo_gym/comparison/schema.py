@@ -20,11 +20,12 @@ restriction later is a behavior change rather than a schema change.
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.global_config import MEAN_ACROSS_REPEATS_PREFIX
 
 
 ReportFormat = Literal["md", "json", "both"]
@@ -92,6 +93,10 @@ class ComparisonConfig(BaseNeMoGymCLIConfig):
         description="Directory to write the comparison report into. Defaults to the candidate rollouts "
         "file's parent directory. Created if absent; existing report files are overwritten.",
     )
+    key_metrics_only: bool = Field(
+        default=False,
+        description="Report only the benchmark's key metrics, omitting the all-other-metrics table.",
+    )
     report_format: ReportFormat = Field(
         default="both",
         description="Which report artifacts to write: `md`, `json`, or `both`.",
@@ -144,8 +149,34 @@ class MetricRow(BaseModel):
     is_key_metric: bool
     # Which sides carried this metric: "baseline" and/or "candidate[<i>]".
     present_in: List[str]
+    # Whether the reported number is the cross-repeat mean rather than the raw metric. Decided per
+    # row, not per side, so the delta always compares like with like.
+    value_is_across_repeats: bool = False
     baseline: Optional[MetricValue] = None
     candidates: List[Optional[CandidateMetricValue]] = Field(default_factory=list)
+
+    @computed_field
+    @property
+    def reported_metric(self) -> str:
+        """The metric name as reported, prefixed when the cross-repeat mean is what is shown."""
+        return f"{MEAN_ACROSS_REPEATS_PREFIX}{self.metric}" if self.value_is_across_repeats else self.metric
+
+    def reported_value(self, side: Optional[MetricValue]) -> Optional[float]:
+        """The number this row reports for one side, per `value_is_across_repeats`."""
+        if side is None:
+            return None
+        return side.mean_across_repeats if self.value_is_across_repeats else side.value
+
+    def reported_ci(self, side: Optional[MetricValue]) -> Tuple[Optional[float], Optional[float]]:
+        """The interval this row reports for one side, or `(None, None)`.
+
+        The recorded interval is the interval *of the cross-repeat mean*, so it is only reported
+        beside that mean. When the row falls back to the rollout-weighted value the interval does
+        not describe it and is withheld.
+        """
+        if side is None or not self.value_is_across_repeats:
+            return None, None
+        return side.ci_low, side.ci_high
 
 
 class TaskFlip(BaseModel):

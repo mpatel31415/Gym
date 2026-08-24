@@ -28,7 +28,7 @@ from nemo_gym.comparison.loading import (
 )
 from nemo_gym.comparison.report import render_markdown, summary_lines, write_reports
 from nemo_gym.comparison.runner import build_comparison_result, resolve_output_dir
-from nemo_gym.comparison.schema import ComparisonConfig
+from nemo_gym.comparison.schema import ComparisonConfig, ComparisonResult
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.path_utils import aggregate_metrics_path_for
 
@@ -352,6 +352,82 @@ class TestMetricRows:
         # The candidate recorded no interval of its own.
         assert row.candidates[0].ci_low is None
 
+    def test_cross_repeat_mean_is_reported_when_both_sides_have_one(self, tmp_path):
+        """It is the repeat-weighted estimate the CI belongs to, so it is what the row reports."""
+        baseline = _load(
+            tmp_path,
+            "base",
+            [_entry(agent_metrics={"mean/reward": 0.80, "mean_across_repeats/mean/reward": 0.75})],
+        )
+        candidate = _load(
+            tmp_path,
+            "cand",
+            [_entry(agent_metrics={"mean/reward": 0.60, "mean_across_repeats/mean/reward": 0.55})],
+            role="candidate",
+        )
+        (row,) = build_metric_rows(baseline, [candidate])
+        assert row.value_is_across_repeats
+        assert row.reported_metric == "mean_across_repeats/mean/reward"
+        assert row.reported_value(row.baseline) == pytest.approx(0.75)
+        assert row.reported_value(row.candidates[0]) == pytest.approx(0.55)
+        # The delta is between the reported numbers, not the raw ones (which would be -0.20).
+        assert row.candidates[0].delta == pytest.approx(-0.20)
+        # Both readings stay in the payload.
+        assert row.baseline.value == pytest.approx(0.80)
+
+    def test_raw_value_is_reported_when_only_one_side_has_a_cross_repeat_mean(self, tmp_path):
+        """Mixing the two would subtract a repeat-weighted mean from a rollout-weighted one."""
+        baseline = _load(
+            tmp_path,
+            "base",
+            [
+                _entry(
+                    agent_metrics={
+                        "mean/reward": 0.80,
+                        "mean_across_repeats/mean/reward": 0.75,
+                        "ci_low_95_across_repeats/mean/reward": 0.70,
+                        "ci_high_95_across_repeats/mean/reward": 0.80,
+                    }
+                )
+            ],
+        )
+        candidate = _load(tmp_path, "cand", [_entry(agent_metrics={"mean/reward": 0.60})], role="candidate")
+        (row,) = build_metric_rows(baseline, [candidate])
+        assert not row.value_is_across_repeats
+        assert row.reported_metric == "mean/reward"
+        assert row.candidates[0].delta == pytest.approx(-0.20)
+        # The recorded interval belongs to the cross-repeat mean, which this row is NOT reporting,
+        # so it must be withheld rather than shown beside the rollout-weighted value.
+        assert row.reported_ci(row.baseline) == (None, None)
+        assert (row.baseline.ci_low, row.baseline.ci_high) == (0.70, 0.80)
+
+    def test_the_interval_is_shown_only_beside_the_mean_it_belongs_to(self, tmp_path):
+        metrics = {
+            "mean/reward": 0.80,
+            "mean_across_repeats/mean/reward": 0.75,
+            "ci_low_95_across_repeats/mean/reward": 0.70,
+            "ci_high_95_across_repeats/mean/reward": 0.80,
+        }
+        baseline = _load(tmp_path, "base", [_entry(agent_metrics=metrics)])
+        candidate = _load(tmp_path, "cand", [_entry(agent_metrics=metrics)], role="candidate")
+        (row,) = build_metric_rows(baseline, [candidate])
+        assert row.value_is_across_repeats
+        assert row.reported_ci(row.baseline) == (0.70, 0.80)
+
+    def test_key_metrics_only_drops_the_other_rows(self, tmp_path):
+        metrics = {"mean/reward": 0.5, "pass@1/accuracy": 40.0}
+        baseline = _load(tmp_path, "base", [_entry(agent_metrics=metrics, key_metrics={"mean/reward": 0.5})])
+        candidate = _load(
+            tmp_path, "cand", [_entry(agent_metrics=metrics, key_metrics={"mean/reward": 0.5})], role="candidate"
+        )
+        assert [row.metric for row in build_metric_rows(baseline, [candidate])] == [
+            "mean/reward",
+            "pass@1/accuracy",
+        ]
+        assert [row.metric for row in build_metric_rows(baseline, [candidate], key_metrics_only=True)] == [
+            "mean/reward"
+        ]
+
     def test_zero_baseline_leaves_relative_change_undefined(self, tmp_path):
         baseline = _load(tmp_path, "base", [_entry(agent_metrics={"mean/reward": 0.0})])
         candidate = _load(tmp_path, "cand", [_entry(agent_metrics={"mean/reward": 0.5})], role="candidate")
@@ -629,6 +705,7 @@ class TestEndToEnd:
                 _entry(
                     agent_metrics={
                         "mean/reward": 0.75,
+                        "mean_across_repeats/mean/reward": 0.75,
                         "ci_low_95_across_repeats/mean/reward": 0.70,
                         "ci_high_95_across_repeats/mean/reward": 0.80,
                         "pass@1[avg-of-2]/accuracy": 75.0,
@@ -643,7 +720,11 @@ class TestEndToEnd:
             "run_b",
             [
                 _entry(
-                    agent_metrics={"mean/reward": 0.25, "pass@1[avg-of-2]/accuracy": 25.0},
+                    agent_metrics={
+                        "mean/reward": 0.25,
+                        "mean_across_repeats/mean/reward": 0.25,
+                        "pass@1[avg-of-2]/accuracy": 25.0,
+                    },
                     key_metrics={"pass@1[avg-of-2]/accuracy": 25.0},
                     groups=[_group(0, [0.0, 0.0]), _group(1, [0.0, 0.0])],
                 )
@@ -787,6 +868,37 @@ class TestEndToEnd:
         assert "Sample flips: 0 fail→pass, 1 pass→fail over 2 common tasks" in text
         assert "compare_report.md" in text
 
+    def test_markdown_and_json_report_the_same_numbers(self, tmp_path):
+        """Every number the markdown shows must come from the JSON and agree with it."""
+        import re
+
+        from nemo_gym.comparison.report import _fmt, _fmt_ci, _fmt_delta_cell
+
+        _, result = self._result(tmp_path)
+        (_, json_fpath) = write_reports(result, tmp_path / "report", "both")
+        # Round-trip through the written JSON so the check runs against what a consumer would read.
+        parsed = ComparisonResult.model_validate(orjson.loads(json_fpath.read_bytes()))
+        rows = {row.reported_metric: row for c in parsed.comparisons for row in c.metrics}
+
+        checked = 0
+        for line in render_markdown(result).splitlines():
+            match = re.match(r"^\| `([^`]+)` \| (.*?) \| (.*?) \| (.*?) \| (.*?) \| (.*?) \|$", line)
+            if not match:
+                continue
+            name, delta_cell, baseline, baseline_ci, candidate, candidate_ci = match.groups()
+            assert name in rows, f"markdown row {name!r} is absent from the JSON"
+            row = rows[name]
+            first = row.candidates[0]
+            assert [delta_cell, baseline, baseline_ci, candidate, candidate_ci] == [
+                _fmt_delta_cell(first),
+                _fmt(row.reported_value(row.baseline)),
+                _fmt_ci(row.reported_ci(row.baseline)),
+                _fmt(row.reported_value(first)),
+                _fmt_ci(row.reported_ci(first)),
+            ], f"markdown and JSON disagree on {name}"
+            checked += 1
+        assert checked == len(rows), "every JSON metric row should appear in the markdown"
+
     def test_markdown_report_renders_the_expected_sections(self, tmp_path):
         _, result = self._result(tmp_path)
         markdown = render_markdown(result)
@@ -797,7 +909,12 @@ class TestEndToEnd:
         )
         # A metric with no recorded interval renders an em dash rather than a fabricated one.
         assert "| `pass@1[avg-of-2]/accuracy` | -50.00 (-66.7%) | 75.00 | — | 25.00 | — |" in markdown
-        assert "| `mean/reward` | -0.5000 (-66.7%) | 0.7500 | [0.7000, 0.8000] | 0.2500 | — |" in markdown
+        # Both sides recorded a cross-repeat mean, so that is what the row reports -- and the
+        # recorded interval, which belongs to that mean, is shown beside it.
+        assert (
+            "| `mean_across_repeats/mean/reward` | -0.5000 (-66.7%) | 0.7500 | [0.7000, 0.8000] | 0.2500 | — |"
+            in markdown
+        )
         assert "### Sample flips" in markdown
         assert "1 pass→fail" in markdown
 

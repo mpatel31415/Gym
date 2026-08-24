@@ -70,7 +70,7 @@ def build_comparison_result(config: ComparisonConfig, command: str) -> Compariso
         candidate_runs = [
             build_loaded_run(run_file, agent) for run_file, agent in zip(candidate_files, selection.candidate_agents)
         ]
-        comparisons.append(compare_runs(baseline_run, candidate_runs))
+        comparisons.append(compare_runs(baseline_run, candidate_runs, key_metrics_only=config.key_metrics_only))
 
     return ComparisonResult(
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),

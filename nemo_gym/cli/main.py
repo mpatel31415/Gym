@@ -944,6 +944,11 @@ COMMANDS = {
                 aliases=("-o",),
                 quote=True,
             ),
+            _bool_flag(
+                "key-metrics-only",
+                "key_metrics_only",
+                "Report only the benchmark's key metrics, omitting the all-other-metrics table.",
+            ),
             _value_flag(
                 "report-format",
                 "report_format",

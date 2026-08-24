@@ -123,19 +123,15 @@ def _metric_value(metrics: Dict[str, Any], name: str) -> Optional[MetricValue]:
     )
 
 
-def _candidate_metric_value(
-    metrics: Dict[str, Any], name: str, baseline_value: Optional[float]
-) -> Optional[CandidateMetricValue]:
-    base = _metric_value(metrics, name)
-    if base is None:
-        return None
-    delta = None if baseline_value is None else base.value - baseline_value
-    delta_pct = None if delta is None or not baseline_value else delta / abs(baseline_value) * 100.0
-    return CandidateMetricValue(**base.model_dump(), delta=delta, delta_pct=delta_pct)
+def build_metric_rows(
+    baseline: LoadedRun, candidates: Sequence[LoadedRun], *, key_metrics_only: bool = False
+) -> List[MetricRow]:
+    """One row per metric reported by any side, key metrics flagged.
 
-
-def build_metric_rows(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> List[MetricRow]:
-    """One row per metric reported by any side, key metrics flagged."""
+    Where every side recorded a cross-repeat mean, that is what the row reports: it is the
+    repeat-weighted estimate the confidence interval belongs to. The choice is made per row rather
+    than per side, so a delta never subtracts a cross-repeat mean from a rollout-weighted one.
+    """
     candidate_metrics = [run.agent_metrics for run in candidates]
     key_metric_names = set(baseline.key_metrics) | {name for run in candidates for name in run.key_metrics}
 
@@ -143,20 +139,41 @@ def build_metric_rows(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> L
     for name in _ordered_metric_names(baseline.agent_metrics, candidate_metrics):
         if not is_comparable_metric(name):
             continue
+        is_key_metric = name in key_metric_names
+        if key_metrics_only and not is_key_metric:
+            continue
+
         baseline_value = _metric_value(baseline.agent_metrics, name)
-        candidate_values = [
-            _candidate_metric_value(metrics, name, baseline_value.value if baseline_value else None)
-            for metrics in candidate_metrics
-        ]
+        candidate_values = [_metric_value(metrics, name) for metrics in candidate_metrics]
+        present = [value for value in (baseline_value, *candidate_values) if value is not None]
+        across_repeats = bool(present) and all(value.mean_across_repeats is not None for value in present)
+
+        def reported(value: Optional[MetricValue]) -> Optional[float]:
+            if value is None:
+                return None
+            return value.mean_across_repeats if across_repeats else value.value
+
+        baseline_number = reported(baseline_value)
+        candidates_out: List[Optional[CandidateMetricValue]] = []
+        for value in candidate_values:
+            number = reported(value)
+            if value is None or number is None:
+                candidates_out.append(None)
+                continue
+            delta = None if baseline_number is None else number - baseline_number
+            delta_pct = None if delta is None or not baseline_number else delta / abs(baseline_number) * 100.0
+            candidates_out.append(CandidateMetricValue(**value.model_dump(), delta=delta, delta_pct=delta_pct))
+
         present_in = ["baseline"] if baseline_value else []
-        present_in += [f"candidate[{i}]" for i, value in enumerate(candidate_values) if value is not None]
+        present_in += [f"candidate[{i}]" for i, value in enumerate(candidates_out) if value is not None]
         rows.append(
             MetricRow(
                 metric=name,
-                is_key_metric=name in key_metric_names,
+                is_key_metric=is_key_metric,
                 present_in=present_in,
+                value_is_across_repeats=across_repeats,
                 baseline=baseline_value,
-                candidates=candidate_values,
+                candidates=candidates_out,
             )
         )
     return rows
@@ -312,17 +329,18 @@ def build_flip_summary(baseline: LoadedRun, candidate: LoadedRun, *, candidate_i
     )
 
 
-def compare_runs(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> AgentComparison:
+def compare_runs(
+    baseline: LoadedRun, candidates: Sequence[LoadedRun], *, key_metrics_only: bool = False
+) -> AgentComparison:
     """Build one agent's comparison block: metric rows, flips, and anything worth flagging."""
-    rows = build_metric_rows(baseline, candidates)
+    rows = build_metric_rows(baseline, candidates, key_metrics_only=key_metrics_only)
     if not any(row.baseline is not None and any(row.candidates) for row in rows):
         baseline_only = sorted(row.metric for row in rows if row.baseline is not None)[:5]
         candidate_only = sorted(row.metric for row in rows if row.baseline is None)[:5]
         raise ConfigError(
             "Baseline and candidate share no metric keys, so there is nothing to compare.\n"
             f"  baseline-only (first 5): {', '.join(baseline_only) or 'none'}\n"
-            f"  candidate-only (first 5): {', '.join(candidate_only) or 'none'}\n"
-            "Runs collected with different --num-repeats produce different pass@k metric names."
+            f"  candidate-only (first 5): {', '.join(candidate_only) or 'none'}"
         )
 
     notes: List[str] = []
