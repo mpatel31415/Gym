@@ -78,15 +78,6 @@ def dispatch(target: str, overrides: list[str]) -> None:
     func()
 
 
-def _hydra_quote(value: str) -> str:
-    """Quote a value for Hydra's override grammar.
-
-    `ensure_ascii=False` because Hydra does not decode `\\uXXXX` escapes: letting json.dumps emit
-    them turns a path like `runs/café` into the literal characters `runs/caf\\u00e9`.
-    """
-    return json.dumps(value, ensure_ascii=False)
-
-
 def _value_flag(
     name: str,
     hydra_key: str,
@@ -101,7 +92,7 @@ def _value_flag(
     return Flag(
         register=lambda p: p.add_argument(f"--{name}", *aliases, dest=dest, choices=choices, help=flag_help),
         translate_to_hydra=lambda args: (
-            [f"+{hydra_key}={_hydra_quote(getattr(args, dest)) if quote else getattr(args, dest)}"]
+            [f"+{hydra_key}={json.dumps(getattr(args, dest)) if quote else getattr(args, dest)}"]
             if getattr(args, dest) is not None
             else []
         ),
@@ -118,12 +109,7 @@ def _bool_flag(name: str, hydra_key: str, flag_help: str) -> Flag:
 
 
 def _comma_list_flag(name: str, hydra_key: str, flag_help: str, *, metavar: str) -> Flag:
-    """A `--name "A,B"` flag that maps to the Hydra override `+<hydra_key>=["A","B"]` (omitted when unset).
-
-    Each element is quoted because Hydra's unquoted list grammar rejects values containing a space,
-    `=` or `[`. A single flag taking a list (rather than a repeatable one) keeps a future N-valued
-    form identical to today's single-valued one.
-    """
+    """A `--name "A,B"` flag that maps to the Hydra override `+<hydra_key>=["A","B"]`"""
     dest = name.replace("-", "_")
 
     def to_hydra(args: argparse.Namespace) -> list[str]:
@@ -131,7 +117,7 @@ def _comma_list_flag(name: str, hydra_key: str, flag_help: str, *, metavar: str)
         if raw is None:
             return []
         items = [item.strip() for item in raw.split(",") if item.strip()]
-        return [f"+{hydra_key}=[{','.join(_hydra_quote(item) for item in items)}]"]
+        return [f"+{hydra_key}=[{','.join(json.dumps(item) for item in items)}]"]
 
     return Flag(
         register=lambda p: p.add_argument(f"--{name}", dest=dest, metavar=metavar, help=flag_help),
@@ -922,7 +908,7 @@ COMMANDS = {
             _value_flag(
                 "baseline",
                 "baseline_rollouts_jsonl_fpath",
-                "Baseline run's rollouts JSONL (its *_aggregate_metrics.json sibling is what gets read).",
+                "Baseline run's rollouts JSONL (its *_aggregate_metrics.json sibling is what gets read today).",
                 quote=True,
             ),
             _comma_list_flag(
