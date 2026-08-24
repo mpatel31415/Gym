@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 import orjson
 
 from nemo_gym import _resolve_under_cwd_or_install
+from nemo_gym.comparison.constants import CI_LOW_95_ACROSS_REPEATS_PREFIX, EXPECTED_NUM_ROLLOUTS_KEY_NAME
 from nemo_gym.comparison.schema import RunFile
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import AGENT_REF_KEY_NAME
@@ -34,15 +35,6 @@ from nemo_gym.path_utils import aggregate_metrics_path_for
 
 
 RunRole = Literal["baseline", "candidate"]
-
-# Prefix of the cross-repeat confidence-interval keys merged into `agent_metrics`. Only written for
-# `mean/*` metrics on runs with >= 2 repeats, and only by runs collected after repeat-level metrics
-# landed -- so its absence is normal, not an error.
-CI_LOW_PREFIX = "ci_low_95_across_repeats/"
-CI_HIGH_PREFIX = "ci_high_95_across_repeats/"
-SE_PREFIX = "se_across_repeats/"
-MEAN_ACROSS_REPEATS_PREFIX = "mean_across_repeats/"
-STD_ERR_ACROSS_RUNS_SUFFIX = "/std_err_across_runs"
 
 
 @dataclass(frozen=True)
@@ -234,9 +226,9 @@ def _derive_num_repeats(
     per repeat but is absent from single-repeat runs and from files written before it existed.
     """
     expected = [
-        group["expected_num_rollouts"]
+        group[EXPECTED_NUM_ROLLOUTS_KEY_NAME]
         for group in group_level_metrics
-        if isinstance(group.get("expected_num_rollouts"), int)
+        if isinstance(group.get(EXPECTED_NUM_ROLLOUTS_KEY_NAME), int)
     ]
     if expected:
         return max(expected)
@@ -260,5 +252,5 @@ def build_loaded_run(run_file: RunFile, agent_name: str) -> LoadedRun:
         group_level_metrics=group_level_metrics,
         num_tasks=len(group_level_metrics),
         num_repeats=_derive_num_repeats(group_level_metrics, repeat_level_metrics),
-        has_repeat_cis=any(key.startswith(CI_LOW_PREFIX) for key in agent_metrics),
+        has_repeat_cis=any(key.startswith(CI_LOW_95_ACROSS_REPEATS_PREFIX) for key in agent_metrics),
     )

@@ -20,14 +20,23 @@ from what the runs already recorded; for now nothing here estimates, tests, or j
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from nemo_gym.comparison.loading import (
-    CI_HIGH_PREFIX,
-    CI_LOW_PREFIX,
+from nemo_gym.comparison.constants import (
+    ACROSS_REPEATS_MARKER,
+    CI_HIGH_95_ACROSS_REPEATS_PREFIX,
+    CI_LOW_95_ACROSS_REPEATS_PREFIX,
+    DISPERSION_PREFIXES,
+    FLIP_FIELD,
     MEAN_ACROSS_REPEATS_PREFIX,
-    SE_PREFIX,
+    PASS_THRESHOLD,
+    ROLLOUT_INFOS_KEY_NAME,
+    SE_ACROSS_REPEATS_PREFIX,
+    STAT_SUFFIXES,
     STD_ERR_ACROSS_RUNS_SUFFIX,
-    LoadedRun,
+    TASK_MAX_KEY,
+    TASK_MEAN_KEY,
+    TASK_MIN_KEY,
 )
+from nemo_gym.comparison.loading import LoadedRun
 from nemo_gym.comparison.schema import (
     AgentComparison,
     CandidateMetricValue,
@@ -40,32 +49,6 @@ from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 
 
-# Dispersion companions of a `mean/<field>` metric. They are summary statistics of the same
-# underlying field, not metrics in their own right, so they never get their own row.
-_DISPERSION_PREFIXES = (
-    "median/",
-    "std/",
-    "min/",
-    "max/",
-    "p25/",
-    "p75/",
-    "sem/",
-    "ci_low_95/",
-    "ci_high_95/",
-)
-# The cross-repeat family is consumed as CI columns, not as rows.
-_ACROSS_REPEATS_MARKER = "_across_repeats/"
-_STAT_SUFFIXES = ("/std_dev_across_runs", STD_ERR_ACROSS_RUNS_SUFFIX)
-
-# The per-task field flips are computed from. Every verify response carries `reward` at minimum.
-FLIP_FIELD = "reward"
-_TASK_MEAN_KEY = f"mean/{FLIP_FIELD}"
-_TASK_MIN_KEY = f"min/{FLIP_FIELD}"
-_TASK_MAX_KEY = f"max/{FLIP_FIELD}"
-# A task "passes" when the majority of its repeats scored a pass.
-_PASS_THRESHOLD = 0.5
-
-
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -76,11 +59,11 @@ def _numeric(value: Any) -> Optional[float]:
 
 def is_comparable_metric(name: str) -> bool:
     """Whether an `agent_metrics` key earns its own row in the all-metrics table."""
-    if name.startswith(_DISPERSION_PREFIXES):
+    if name.startswith(DISPERSION_PREFIXES):
         return False
-    if _ACROSS_REPEATS_MARKER in name:
+    if ACROSS_REPEATS_MARKER in name:
         return False
-    return not name.endswith(_STAT_SUFFIXES)
+    return not name.endswith(STAT_SUFFIXES)
 
 
 def _ordered_metric_names(baseline: Dict[str, Any], candidates: Sequence[Dict[str, Any]]) -> List[str]:
@@ -101,9 +84,9 @@ def _metric_value(metrics: Dict[str, Any], name: str) -> Optional[MetricValue]:
         return None
     return MetricValue(
         value=value,
-        ci_low=_numeric(metrics.get(f"{CI_LOW_PREFIX}{name}")),
-        ci_high=_numeric(metrics.get(f"{CI_HIGH_PREFIX}{name}")),
-        se_across_repeats=_numeric(metrics.get(f"{SE_PREFIX}{name}")),
+        ci_low=_numeric(metrics.get(f"{CI_LOW_95_ACROSS_REPEATS_PREFIX}{name}")),
+        ci_high=_numeric(metrics.get(f"{CI_HIGH_95_ACROSS_REPEATS_PREFIX}{name}")),
+        se_across_repeats=_numeric(metrics.get(f"{SE_ACROSS_REPEATS_PREFIX}{name}")),
         mean_across_repeats=_numeric(metrics.get(f"{MEAN_ACROSS_REPEATS_PREFIX}{name}")),
         std_err_across_runs=_numeric(metrics.get(f"{name}{STD_ERR_ACROSS_RUNS_SUFFIX}")),
     )
@@ -153,7 +136,7 @@ def _groups_by_task(run: LoadedRun) -> Dict[int, Dict[str, Any]]:
 
 
 def _per_repeat_rewards(group: Dict[str, Any]) -> Optional[List[float]]:
-    rollout_infos = group.get("rollout_infos")
+    rollout_infos = group.get(ROLLOUT_INFOS_KEY_NAME)
     if not isinstance(rollout_infos, list) or not rollout_infos:
         return None
     ordered = sorted(rollout_infos, key=lambda info: info.get(ROLLOUT_INDEX_KEY_NAME, 0))
@@ -172,9 +155,9 @@ def _looks_binary(
     for task_index in common:
         for groups in (baseline_groups, candidate_groups):
             group = groups[task_index]
-            observed = [group.get(_TASK_MIN_KEY), group.get(_TASK_MAX_KEY)]
+            observed = [group.get(TASK_MIN_KEY), group.get(TASK_MAX_KEY)]
             if all(value is None for value in observed):
-                observed = [group.get(_TASK_MEAN_KEY)]
+                observed = [group.get(TASK_MEAN_KEY)]
             for value in observed:
                 number = _numeric(value)
                 if number is None or number not in (0.0, 1.0):
@@ -183,9 +166,9 @@ def _looks_binary(
 
 
 def _flip_direction(baseline_score: float, candidate_score: float) -> Optional[str]:
-    baseline_passed = baseline_score > _PASS_THRESHOLD
-    candidate_passed = candidate_score > _PASS_THRESHOLD
-    if baseline_score == _PASS_THRESHOLD or candidate_score == _PASS_THRESHOLD:
+    baseline_passed = baseline_score > PASS_THRESHOLD
+    candidate_passed = candidate_score > PASS_THRESHOLD
+    if baseline_score == PASS_THRESHOLD or candidate_score == PASS_THRESHOLD:
         return None
     if baseline_passed and not candidate_passed:
         return "pass_to_fail"
@@ -230,8 +213,8 @@ def build_flip_summary(baseline: LoadedRun, candidate: LoadedRun, *, candidate_i
 
     scored: List[Tuple[int, float, float]] = []
     for task_index in common:
-        baseline_score = _numeric(baseline_groups[task_index].get(_TASK_MEAN_KEY))
-        candidate_score = _numeric(candidate_groups[task_index].get(_TASK_MEAN_KEY))
+        baseline_score = _numeric(baseline_groups[task_index].get(TASK_MEAN_KEY))
+        candidate_score = _numeric(candidate_groups[task_index].get(TASK_MEAN_KEY))
         if baseline_score is not None and candidate_score is not None:
             scored.append((task_index, baseline_score, candidate_score))
 
@@ -239,7 +222,7 @@ def build_flip_summary(baseline: LoadedRun, candidate: LoadedRun, *, candidate_i
         return FlipSummary(
             candidate_index=candidate_index,
             mode="unavailable",
-            reason=f"no `{_TASK_MEAN_KEY}` recorded for the overlapping tasks.",
+            reason=f"no `{TASK_MEAN_KEY}` recorded for the overlapping tasks.",
             **counts,
         )
 
@@ -274,7 +257,7 @@ def build_flip_summary(baseline: LoadedRun, candidate: LoadedRun, *, candidate_i
     for task_index, baseline_score, candidate_score in scored:
         direction = _flip_direction(baseline_score, candidate_score)
         if direction is None:
-            if _PASS_THRESHOLD in (baseline_score, candidate_score):
+            if PASS_THRESHOLD in (baseline_score, candidate_score):
                 tied += 1
             else:
                 unchanged += 1
