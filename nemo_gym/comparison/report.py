@@ -29,7 +29,7 @@ from nemo_gym.comparison.schema import (
     FlipSummary,
     MetricRow,
     MetricValue,
-    RunRef,
+    RunFile,
 )
 from nemo_gym.config_types import ConfigError
 
@@ -106,7 +106,7 @@ def _run_summary_table(result: ComparisonResult, comparison: AgentComparison) ->
     def row(name: str, baseline_cell: str, candidate_cells: Sequence[str]) -> List[str]:
         return [name, baseline_cell, *candidate_cells]
 
-    runs: Sequence[RunRef] = result.candidates
+    runs: Sequence[RunFile] = result.candidates
     rows = [
         row("Run", f"`{result.baseline.label}`", [f"`{run.label}`" for run in runs]),
         row(

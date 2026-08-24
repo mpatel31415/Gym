@@ -15,7 +15,7 @@
 """Diffing two loaded runs: metric rows and per-task sample flips.
 
 Pure computation -- no filesystem access, no statistics. Confidence intervals are read verbatim
-from what the runs already recorded; nothing here estimates, tests, or judges.
+from what the runs already recorded; for now nothing here estimates, tests, or judges.
 """
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple

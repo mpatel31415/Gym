@@ -19,9 +19,10 @@ v0 only ever compares one candidate, but keeping the shape list-valued means lif
 restriction later is a behavior change rather than a schema change.
 """
 
-from typing import Dict, List, Literal, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 
@@ -33,7 +34,7 @@ ReportFormat = Literal["md", "json", "both"]
 MAX_CANDIDATES = 1
 
 
-class CompareConfig(BaseNeMoGymCLIConfig):
+class ComparisonConfig(BaseNeMoGymCLIConfig):
     """Compare a baseline eval run against a candidate run.
 
     Reads only each run's `<stem>_aggregate_metrics.json`, derived from the rollouts JSONL path you
@@ -49,7 +50,7 @@ class CompareConfig(BaseNeMoGymCLIConfig):
     ```
 
     To point at metrics files that do not follow the `<stem>_aggregate_metrics.json` convention,
-    pass `--baseline-agg-metrics` and `--candidates-agg-metrics`.
+    set `baseline_aggregate_metrics_fpath` and `candidate_aggregate_metrics_fpaths`.
     """
 
     baseline_rollouts_jsonl_fpath: str = Field(
@@ -97,27 +98,21 @@ class CompareConfig(BaseNeMoGymCLIConfig):
     )
 
     @model_validator(mode="after")
-    def _check_candidate_parallel_lists(self) -> "CompareConfig":
+    def _check_candidate_parallel_lists(self) -> "ComparisonConfig":
         num_candidates = len(self.candidate_rollouts_jsonl_fpaths)
         if num_candidates > MAX_CANDIDATES:
             raise ValueError(
                 f"{num_candidates} candidates were given, but comparing more than {MAX_CANDIDATES} candidate "
-                "is not supported yet. Pass a single path to --candidates."
+                "is not supported yet. Give a single candidate run."
             )
-        # Name the flag, not just the config key: neither is derivable from the other
-        # (`--candidates-agg-metrics` vs `candidate_aggregate_metrics_fpaths`).
-        for field_name, value, flag in (
-            ("candidate_agent_names", self.candidate_agent_names, "--candidate-agents"),
-            (
-                "candidate_aggregate_metrics_fpaths",
-                self.candidate_aggregate_metrics_fpaths,
-                "--candidates-agg-metrics",
-            ),
+        for field_name, value in (
+            ("candidate_agent_names", self.candidate_agent_names),
+            ("candidate_aggregate_metrics_fpaths", self.candidate_aggregate_metrics_fpaths),
         ):
             if value is not None and len(value) != num_candidates:
                 raise ValueError(
                     f"{field_name} has {len(value)} entries but {num_candidates} candidate run(s) were given. "
-                    f"Pass {flag} once per candidate, in the same order."
+                    "Give one entry per candidate, in the same order."
                 )
         return self
 
@@ -193,13 +188,29 @@ class AgentComparison(BaseModel):
     notes: List[str] = Field(default_factory=list)
 
 
-class RunRef(BaseModel):
+class RunFile(BaseModel):
+    """One run's parsed `*_aggregate_metrics.json`, indexed by agent name."""
+
+    model_config = ConfigDict(frozen=True)
+
     role: Literal["baseline", "candidate"]
-    label: str
-    rollouts_jsonl_fpath: str
-    aggregate_metrics_fpath: str
-    agents: List[str] = Field(default_factory=list)
-    num_repeats: Optional[int] = None
+    index: int = 0
+    rollouts_jsonl_fpath: Path
+    aggregate_metrics_fpath: Path
+    # The whole parsed payload. Typed `Any` so pydantic does not walk a multi-megabyte file, and
+    # excluded so the report references the run rather than embedding its input.
+    entries_by_agent: Dict[str, Any] = Field(default_factory=dict, exclude=True, repr=False)
+
+    @computed_field
+    @property
+    def label(self) -> str:
+        """Short display name for the run: the directory its rollouts live in."""
+        return self.rollouts_jsonl_fpath.parent.name or self.rollouts_jsonl_fpath.stem
+
+    @computed_field
+    @property
+    def agent_names(self) -> List[str]:
+        return sorted(self.entries_by_agent)
 
 
 class ComparisonResult(BaseModel):
@@ -209,8 +220,8 @@ class ComparisonResult(BaseModel):
     generated_at: str
     nemo_gym_version: str
     command: str
-    baseline: RunRef
-    candidates: List[RunRef]
+    baseline: RunFile
+    candidates: List[RunFile]
     comparisons: List[AgentComparison] = Field(default_factory=list)
     skipped_agents: Dict[str, List[str]] = Field(default_factory=dict)
     warnings: List[str] = Field(default_factory=list)

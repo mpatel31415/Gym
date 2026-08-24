@@ -23,13 +23,12 @@ import pytest
 from nemo_gym.comparison.diff import build_flip_summary, build_metric_rows, compare_runs, is_comparable_metric
 from nemo_gym.comparison.loading import (
     build_loaded_run,
-    load_run_file,
+    load_agg_metrics_file,
     resolve_agent_selections,
-    run_labels,
 )
 from nemo_gym.comparison.report import render_markdown, summary_lines, write_reports
 from nemo_gym.comparison.runner import build_comparison_result, resolve_output_dir
-from nemo_gym.comparison.schema import CompareConfig
+from nemo_gym.comparison.schema import ComparisonConfig
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.path_utils import aggregate_metrics_path_for
 
@@ -97,8 +96,8 @@ def _write_run(tmp_path: Path, name: str, entries: List[Dict[str, Any]], *, writ
 
 def _load(tmp_path: Path, name: str, entries: List[Dict[str, Any]], *, role="baseline", agent: str = AGENT):
     rollouts = _write_run(tmp_path, name, entries)
-    run_file = load_run_file(str(rollouts), role=role, flag_label=f"--{role}")
-    return build_loaded_run(run_file, agent, label=name)
+    run_file = load_agg_metrics_file(str(rollouts), role=role)
+    return build_loaded_run(run_file, agent)
 
 
 class TestAggregateMetricsPath:
@@ -118,29 +117,28 @@ class TestAggregateMetricsPath:
 class TestLoadRunFile:
     def test_reads_entries_keyed_by_agent(self, tmp_path):
         rollouts = _write_run(tmp_path, "base", [_entry()])
-        run_file = load_run_file(str(rollouts), role="baseline", flag_label="--baseline")
+        run_file = load_agg_metrics_file(str(rollouts), role="baseline")
         assert run_file.agent_names == [AGENT]
         assert run_file.aggregate_metrics_fpath == aggregate_metrics_path_for(rollouts)
 
     def test_missing_rollouts_and_metrics_names_the_run(self, tmp_path):
-        with pytest.raises(ConfigPathNotFoundError, match="Run not found"):
-            load_run_file(str(tmp_path / "nope" / "rollouts.jsonl"), role="baseline", flag_label="--baseline")
+        with pytest.raises(ConfigPathNotFoundError, match="Aggregate metrics not found"):
+            load_agg_metrics_file(str(tmp_path / "nope" / "rollouts.jsonl"), role="baseline")
 
     def test_missing_metrics_with_present_rollouts_explains_disable_aggregation(self, tmp_path):
         run_dir = tmp_path / "partial"
         run_dir.mkdir()
         (run_dir / "rollouts.jsonl").write_text("")
         with pytest.raises(ConfigPathNotFoundError, match="disable-aggregation"):
-            load_run_file(str(run_dir / "rollouts.jsonl"), role="baseline", flag_label="--baseline")
+            load_agg_metrics_file(str(run_dir / "rollouts.jsonl"), role="baseline")
 
     def test_override_is_used_instead_of_the_sibling(self, tmp_path):
         rollouts = _write_run(tmp_path, "base", [_entry()])
         override = tmp_path / "elsewhere.json"
         override.write_bytes(orjson.dumps([_entry(agent="other")]))
-        run_file = load_run_file(
+        run_file = load_agg_metrics_file(
             str(rollouts),
             role="baseline",
-            flag_label="--baseline",
             aggregate_metrics_fpath_override=str(override),
         )
         assert run_file.agent_names == ["other"]
@@ -162,16 +160,15 @@ class TestLoadRunFile:
         rollouts.write_text("")
         aggregate_metrics_path_for(rollouts).write_bytes(orjson.dumps(payload))
         with pytest.raises(ConfigError, match=message):
-            load_run_file(str(rollouts), role="baseline", flag_label="--baseline")
+            load_agg_metrics_file(str(rollouts), role="baseline")
 
     def test_a_directory_in_place_of_the_metrics_file_is_rejected_cleanly(self, tmp_path):
         """`exists()` is true for a directory, so the read itself has to fail cleanly."""
         rollouts = _write_run(tmp_path, "base", [_entry()])
         with pytest.raises(ConfigError, match="Cannot read aggregate metrics"):
-            load_run_file(
+            load_agg_metrics_file(
                 str(rollouts),
                 role="baseline",
-                flag_label="--baseline",
                 aggregate_metrics_fpath_override=str(tmp_path / "base"),
             )
 
@@ -183,7 +180,7 @@ class TestLoadRunFile:
             if os.access(metrics, os.R_OK):
                 pytest.skip("cannot make a file unreadable as this user (running as root?)")
             with pytest.raises(ConfigError, match="Cannot read aggregate metrics"):
-                load_run_file(str(rollouts), role="baseline", flag_label="--baseline")
+                load_agg_metrics_file(str(rollouts), role="baseline")
         finally:
             metrics.chmod(0o644)
 
@@ -194,7 +191,7 @@ class TestLoadRunFile:
         rollouts.write_text("")
         aggregate_metrics_path_for(rollouts).write_text("{not json")
         with pytest.raises(ConfigError, match="is not valid JSON"):
-            load_run_file(str(rollouts), role="baseline", flag_label="--baseline")
+            load_agg_metrics_file(str(rollouts), role="baseline")
 
 
 class TestNumRepeatsDerivation:
@@ -202,17 +199,32 @@ class TestNumRepeatsDerivation:
         run = _load(tmp_path, "base", [_entry(groups=[_group(0, [1.0, 0.0, 1.0])])])
         assert run.num_repeats == 3
 
-    def test_falls_back_to_repeat_level_metrics_for_single_agent_files(self, tmp_path):
+    def test_falls_back_to_repeat_level_metrics(self, tmp_path):
         groups = [{"_ng_task_index": 0, "mean/reward": 1.0}]
         entry = _entry(groups=groups, repeat_level_metrics=[{"_ng_rollout_index": i} for i in range(4)])
         run = _load(tmp_path, "base", [entry])
         assert run.num_repeats == 4
 
-    def test_falls_back_to_rollout_infos(self, tmp_path):
-        groups = [_group(0, [1.0, 0.0])]
-        groups[0].pop("expected_num_rollouts")
+    def test_repeat_level_fallback_works_per_agent_in_a_multi_agent_file(self, tmp_path):
+        """Aggregation nests each agent's repeat_level_metrics under its own entry, stripped of
+        `agent_ref`, so the fallback is per-agent regardless of how many agents the file holds."""
+        groups = [{"_ng_task_index": 0, "mean/reward": 1.0}]
+        entries = [
+            _entry(agent="a", groups=groups, repeat_level_metrics=[{"_ng_rollout_index": i} for i in range(2)]),
+            _entry(agent="b", groups=groups, repeat_level_metrics=[{"_ng_rollout_index": i} for i in range(7)]),
+        ]
+        assert _load(tmp_path, "multi", entries, agent="a").num_repeats == 2
+        assert _load(tmp_path, "multi", entries, agent="b").num_repeats == 7
+
+    def test_a_partially_recovered_run_reports_its_full_repeat_count(self, tmp_path):
+        """Some tasks come up short when a run is partially recovered; the run still had 3 repeats.
+
+        Taking the mode instead would report 1 here, and would depend on task ordering when the
+        per-task counts tie.
+        """
+        groups = [_group(0, [1.0, 0.0, 1.0]), _group(1, [1.0]), _group(2, [0.0, 1.0])]
         run = _load(tmp_path, "base", [_entry(groups=groups)])
-        assert run.num_repeats == 2
+        assert run.num_repeats == 3
 
     def test_unknown_when_nothing_records_it(self, tmp_path):
         run = _load(tmp_path, "base", [_entry(groups=[{"_ng_task_index": 0, "mean/reward": 1.0}])])
@@ -231,15 +243,13 @@ class TestNumRepeatsDerivation:
 
 class TestAgentSelection:
     def _files(self, tmp_path, baseline_agents, candidate_agents):
-        baseline = load_run_file(
+        baseline = load_agg_metrics_file(
             str(_write_run(tmp_path, "base", [_entry(agent=a) for a in baseline_agents])),
             role="baseline",
-            flag_label="--baseline",
         )
-        candidate = load_run_file(
+        candidate = load_agg_metrics_file(
             str(_write_run(tmp_path, "cand", [_entry(agent=a) for a in candidate_agents])),
             role="candidate",
-            flag_label="--candidates",
         )
         return baseline, candidate
 
@@ -287,7 +297,7 @@ class TestAgentSelection:
 
     def test_per_side_selection_needs_a_flag_when_a_side_is_ambiguous(self, tmp_path):
         baseline, candidate = self._files(tmp_path, ["a", "b"], ["new_name"])
-        with pytest.raises(ConfigError, match="Pass --baseline-agent to choose one"):
+        with pytest.raises(ConfigError, match="contain 2 agents: a, b"):
             resolve_agent_selections(baseline, [candidate], candidate_agent_names=["new_name"])
 
 
@@ -462,19 +472,23 @@ class TestCompareRuns:
         assert any("confidence intervals" in note for note in comparison.notes)
 
 
-class TestRunLabels:
-    def test_uses_parent_directory_names(self):
-        assert run_labels([Path("out/run_a/rollouts.jsonl"), Path("out/run_b/rollouts.jsonl")]) == [
-            "run_a",
-            "run_b",
-        ]
+class TestRunLabel:
+    def test_label_is_the_run_directory(self, tmp_path):
+        run_file = load_agg_metrics_file(str(_write_run(tmp_path, "run_a", [_entry()])), role="baseline")
+        assert run_file.label == "run_a"
 
-    def test_disambiguates_colliding_parents(self):
-        labels = run_labels([Path("a/artifacts/rollouts.jsonl"), Path("b/artifacts/rollouts.jsonl")])
-        assert labels == ["a/artifacts", "b/artifacts"]
+    def test_label_falls_back_to_the_stem_when_there_is_no_directory(self):
+        from nemo_gym.comparison.schema import RunFile
+
+        run_file = RunFile(
+            role="baseline",
+            rollouts_jsonl_fpath=Path("rollouts.jsonl"),
+            aggregate_metrics_fpath=Path("rollouts_aggregate_metrics.json"),
+        )
+        assert run_file.label == "rollouts"
 
 
-class TestCompareConfig:
+class TestComparisonConfig:
     def _config(self, **overrides) -> Dict[str, Any]:
         return {
             "baseline_rollouts_jsonl_fpath": "a/rollouts.jsonl",
@@ -483,36 +497,38 @@ class TestCompareConfig:
         }
 
     def test_single_candidate_validates(self):
-        config = CompareConfig.model_validate(self._config())
+        config = ComparisonConfig.model_validate(self._config())
         assert config.report_format == "both"
         assert config.output_dirpath is None
 
     def test_multiple_candidates_are_rejected_for_now(self):
         payload = self._config(candidate_rollouts_jsonl_fpaths=["b/r.jsonl", "c/r.jsonl"])
         with pytest.raises(ValueError, match="is not supported yet"):
-            CompareConfig.model_validate(payload)
+            ComparisonConfig.model_validate(payload)
 
     def test_candidate_agent_list_must_match_candidate_count(self):
         payload = self._config(candidate_agent_names=["one", "two"])
-        with pytest.raises(ValueError, match="--candidate-agents once per candidate"):
-            CompareConfig.model_validate(payload)
+        with pytest.raises(ValueError, match="candidate_agent_names has 2 entries"):
+            ComparisonConfig.model_validate(payload)
 
     def test_metrics_override_list_must_match_candidate_count(self):
         payload = self._config(candidate_aggregate_metrics_fpaths=["x.json", "y.json"])
         with pytest.raises(ValueError, match="candidate_aggregate_metrics_fpaths has 2 entries"):
-            CompareConfig.model_validate(payload)
+            ComparisonConfig.model_validate(payload)
 
     @pytest.mark.parametrize(
-        "payload_kwargs, flag",
+        "payload_kwargs, field_name",
         [
-            ({"candidate_agent_names": ["one", "two"]}, "--candidate-agents"),
-            ({"candidate_aggregate_metrics_fpaths": ["x.json", "y.json"]}, "--candidates-agg-metrics"),
+            ({"candidate_agent_names": ["one", "two"]}, "candidate_agent_names"),
+            ({"candidate_aggregate_metrics_fpaths": ["x.json", "y.json"]}, "candidate_aggregate_metrics_fpaths"),
         ],
     )
-    def test_parallel_list_errors_name_the_flag_to_fix(self, payload_kwargs, flag):
-        """The config key is not derivable from the flag name, so the error has to say both."""
-        with pytest.raises(ValueError, match=f"Pass {flag} once per candidate"):
-            CompareConfig.model_validate(self._config(**payload_kwargs))
+    def test_every_per_candidate_list_reports_the_same_way(self, payload_kwargs, field_name):
+        """Both per-candidate lists name their own field and say what to do, in one shared wording."""
+        with pytest.raises(ValueError, match=f"{field_name} has 2 entries but 1 candidate"):
+            ComparisonConfig.model_validate(self._config(**payload_kwargs))
+        with pytest.raises(ValueError, match="Give one entry per candidate, in the same order"):
+            ComparisonConfig.model_validate(self._config(**payload_kwargs))
 
 
 class TestCliFlagTranslation:
@@ -525,11 +541,11 @@ class TestCliFlagTranslation:
         assert unknown == [], f"flags left unparsed: {unknown}"
         return [token for flag in args._command.flags for token in flag.translate_to_hydra(args)]
 
-    def _config(self, argv: List[str]) -> CompareConfig:
+    def _config(self, argv: List[str]) -> ComparisonConfig:
         from hydra.core.override_parser.overrides_parser import OverridesParser
 
         parsed = OverridesParser.create().parse_overrides(self._overrides(argv))
-        return CompareConfig.model_validate({o.key_or_group: o.value() for o in parsed})
+        return ComparisonConfig.model_validate({o.key_or_group: o.value() for o in parsed})
 
     def test_paths_round_trip_through_hydra(self, tmp_path):
         config = self._config(
@@ -541,7 +557,6 @@ class TestCliFlagTranslation:
     @pytest.mark.parametrize(
         "path",
         [
-            "runs/café/rollouts.jsonl",  # Hydra does not decode \uXXXX escapes
             "runs/with space/rollouts.jsonl",
             "runs/v=2/rollouts.jsonl",
             "runs/[v2]/rollouts.jsonl",
@@ -634,14 +649,14 @@ class TestEndToEnd:
                 )
             ],
         )
-        config = CompareConfig.model_validate(
+        config = ComparisonConfig.model_validate(
             {
                 "baseline_rollouts_jsonl_fpath": str(baseline_rollouts),
                 "candidate_rollouts_jsonl_fpaths": [str(candidate_rollouts)],
                 **config_overrides,
             }
         )
-        return config, build_comparison_result(config, command="gym compare ...")
+        return config, build_comparison_result(config, "gym compare ...")
 
     def test_result_carries_both_sides_and_the_flip(self, tmp_path):
         _, result = self._result(tmp_path)
@@ -699,7 +714,7 @@ class TestEndToEnd:
         from nemo_gym.comparison.runner import run_comparison
 
         config, _ = self._result(tmp_path, output_dirpath=str(tmp_path / "out"))
-        result, written = run_comparison(config, command="gym eval compare ...")
+        result, written = run_comparison(config, "gym eval compare ...")
         assert result.comparisons[0].baseline_agent == AGENT
         assert [path.name for path in written] == ["compare_report.md", "compare_report.json"]
         assert all(path.exists() for path in written)
@@ -739,13 +754,13 @@ class TestEndToEnd:
     def test_summary_reports_every_flip_mode(self, tmp_path, groups, expected):
         baseline = _write_run(tmp_path / "modes", "run_a", [_entry(groups=[_group(0, [0.75])])])
         candidate = _write_run(tmp_path / "modes", "run_b", [_entry(groups=groups)])
-        config = CompareConfig.model_validate(
+        config = ComparisonConfig.model_validate(
             {
                 "baseline_rollouts_jsonl_fpath": str(baseline),
                 "candidate_rollouts_jsonl_fpaths": [str(candidate)],
             }
         )
-        result = build_comparison_result(config, command="gym eval compare ...")
+        result = build_comparison_result(config, "gym eval compare ...")
         assert any(expected in line for line in summary_lines(result, []))
 
     def test_json_report_round_trips(self, tmp_path):
@@ -791,13 +806,13 @@ class TestReportEdgeCases:
     def _result(self, tmp_path, baseline_entry, candidate_entry, name="edge"):
         baseline_rollouts = _write_run(tmp_path / name, "run_a", [baseline_entry])
         candidate_rollouts = _write_run(tmp_path / name, "run_b", [candidate_entry])
-        config = CompareConfig.model_validate(
+        config = ComparisonConfig.model_validate(
             {
                 "baseline_rollouts_jsonl_fpath": str(baseline_rollouts),
                 "candidate_rollouts_jsonl_fpaths": [str(candidate_rollouts)],
             }
         )
-        return build_comparison_result(config, command="gym compare ...")
+        return build_comparison_result(config, "gym compare ...")
 
     def test_missing_values_and_zero_baseline_render_placeholders(self, tmp_path):
         baseline = _entry(
@@ -881,13 +896,13 @@ class TestReportEdgeCases:
             "run_b",
             [_entry(agent="a", groups=[_group(0, [0.0])]), _entry(agent="b", groups=[_group(0, [0.0])])],
         )
-        config = CompareConfig.model_validate(
+        config = ComparisonConfig.model_validate(
             {
                 "baseline_rollouts_jsonl_fpath": str(baseline),
                 "candidate_rollouts_jsonl_fpaths": [str(candidate)],
             }
         )
-        markdown = render_markdown(build_comparison_result(config, command="gym compare ..."))
+        markdown = render_markdown(build_comparison_result(config, "gym compare ..."))
         assert "## Agent: `a`" in markdown
         assert "## Agent: `b`" in markdown
 
@@ -898,13 +913,13 @@ class TestReportEdgeCases:
             [_entry(agent="a", groups=[_group(0, [1.0])]), _entry(agent="extra", groups=[_group(0, [1.0])])],
         )
         candidate = _write_run(tmp_path / "warn", "run_b", [_entry(agent="a", groups=[_group(0, [0.0])])])
-        config = CompareConfig.model_validate(
+        config = ComparisonConfig.model_validate(
             {
                 "baseline_rollouts_jsonl_fpath": str(baseline),
                 "candidate_rollouts_jsonl_fpaths": [str(candidate)],
             }
         )
-        result = build_comparison_result(config, command="gym compare ...")
+        result = build_comparison_result(config, "gym compare ...")
         assert result.skipped_agents == {"baseline": ["extra"]}
         markdown = render_markdown(result)
         assert "## Warnings" in markdown

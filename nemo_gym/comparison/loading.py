@@ -20,16 +20,16 @@ derived from.
 """
 
 import difflib
-from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Literal, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 import orjson
 
 from nemo_gym import _resolve_under_cwd_or_install
+from nemo_gym.comparison.schema import RunFile
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
-from nemo_gym.global_config import AGENT_REF_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import AGENT_REF_KEY_NAME
 from nemo_gym.path_utils import aggregate_metrics_path_for
 
 
@@ -46,40 +46,19 @@ STD_ERR_ACROSS_RUNS_SUFFIX = "/std_err_across_runs"
 
 
 @dataclass(frozen=True)
-class RunFile:
-    """A parsed `*_aggregate_metrics.json`, indexed by agent name."""
-
-    role: RunRole
-    index: int
-    flag_label: str
-    rollouts_jsonl_fpath: Path
-    aggregate_metrics_fpath: Path
-    entries_by_agent: Dict[str, Dict[str, Any]]
-
-    @property
-    def agent_names(self) -> List[str]:
-        return sorted(self.entries_by_agent)
-
-
-@dataclass(frozen=True)
 class LoadedRun:
-    """One side of the comparison, narrowed to a single agent."""
+    """One side of the comparison, narrowed to a single agent.
 
-    role: RunRole
-    index: int
-    label: str
-    rollouts_jsonl_fpath: Path
-    aggregate_metrics_fpath: Path
-    available_agent_names: Tuple[str, ...]
+    Only what the diff actually consumes. Run identity (role, paths, label) stays on `RunFile`,
+    which the report carries directly, so it is deliberately not duplicated here.
+    """
+
     agent_name: str
     agent_metrics: Dict[str, Any]
     key_metrics: Dict[str, Any]
     group_level_metrics: List[Dict[str, Any]]
-    repeat_level_metrics: List[Dict[str, Any]] = field(default_factory=list)
     num_tasks: int = 0
     num_repeats: Optional[int] = None
-    task_indices: FrozenSet[int] = frozenset()
-    has_rollout_infos: bool = False
     has_repeat_cis: bool = False
 
 
@@ -91,19 +70,17 @@ class AgentSelection:
     candidate_agents: Tuple[str, ...]
 
 
-def resolve_aggregate_metrics_fpath(rollouts_jsonl_fpath: Path, override: Optional[str]) -> Path:
+def resolve_aggregate_metrics_fpath(rollouts_jsonl_fpath: str, override: Optional[str]) -> Path:
     """The `*_aggregate_metrics.json` to read: the explicit override, else the derived sibling."""
     if override:
         return _resolve_under_cwd_or_install(override)
-    return aggregate_metrics_path_for(rollouts_jsonl_fpath)
+    return aggregate_metrics_path_for(_resolve_under_cwd_or_install(rollouts_jsonl_fpath))
 
 
 def _read_agent_entries(metrics_fpath: Path) -> Dict[str, Dict[str, Any]]:
     try:
         raw = metrics_fpath.read_bytes()
     except OSError as e:
-        # `exists()` is true for a directory and for a file the user cannot read, so the guard in
-        # load_run_file lets both through to here. Convert rather than surfacing a raw traceback.
         raise ConfigError(f"Cannot read aggregate metrics at '{metrics_fpath}': {e}") from e
 
     try:
@@ -133,57 +110,51 @@ def _read_agent_entries(metrics_fpath: Path) -> Dict[str, Dict[str, Any]]:
     return entries
 
 
-def load_run_file(
+def load_agg_metrics_file(
     rollouts_jsonl_fpath: str,
-    *,
     role: RunRole,
     index: int = 0,
-    flag_label: str,
     aggregate_metrics_fpath_override: Optional[str] = None,
 ) -> RunFile:
     """Resolve and parse one run's `*_aggregate_metrics.json`."""
-    rollouts_path = _resolve_under_cwd_or_install(rollouts_jsonl_fpath)
-    metrics_path = resolve_aggregate_metrics_fpath(rollouts_path, aggregate_metrics_fpath_override)
+    metrics_path = resolve_aggregate_metrics_fpath(rollouts_jsonl_fpath, aggregate_metrics_fpath_override)
 
     if not metrics_path.exists():
-        if not rollouts_path.exists():
-            raise ConfigPathNotFoundError(
-                f"Run not found: '{rollouts_path}' ({flag_label}). Check the path is spelled correctly."
-            )
         raise ConfigPathNotFoundError(
-            f"Aggregate metrics not found: '{metrics_path}', derived from '{rollouts_path}' ({flag_label}). "
+            f"Aggregate metrics not found: '{metrics_path}', derived from '{rollouts_jsonl_fpath}'. "
             "The run may have been collected with --disable-aggregation: run `gym eval aggregate` first, "
             "or point at the metrics file directly with "
-            f"+{'baseline_aggregate_metrics_fpath' if role == 'baseline' else 'candidate_aggregate_metrics_fpaths'}."
+            "'baseline_aggregate_metrics_fpath' or 'candidate_aggregate_metrics_fpaths'."
         )
 
     return RunFile(
         role=role,
         index=index,
-        flag_label=flag_label,
-        rollouts_jsonl_fpath=rollouts_path,
+        rollouts_jsonl_fpath=_resolve_under_cwd_or_install(rollouts_jsonl_fpath),
         aggregate_metrics_fpath=metrics_path,
         entries_by_agent=_read_agent_entries(metrics_path),
     )
 
 
-def _sole_agent(run_file: RunFile, flag_hint: str) -> str:
+def _sole_agent(run_file: RunFile) -> str:
+    """The file's only agent, or an error asking which of several to use."""
     if len(run_file.entries_by_agent) == 1:
         return next(iter(run_file.entries_by_agent))
     raise ConfigError(
-        f"'{run_file.aggregate_metrics_fpath}' ({run_file.flag_label}) contains "
+        f"The {run_file.role} run's metrics at '{run_file.aggregate_metrics_fpath}' contain "
         f"{len(run_file.entries_by_agent)} agents: {', '.join(run_file.agent_names)}. "
-        f"Pass {flag_hint} to choose one."
+        "Set 'agent_name' to compare one of them on both sides, or 'baseline_agent_name' / "
+        "'candidate_agent_names' to choose a different agent per side."
     )
 
 
-def _require_agent(run_file: RunFile, agent_name: str, flag_label: str) -> None:
+def _require_agent(run_file: RunFile, agent_name: str) -> None:
     if agent_name not in run_file.entries_by_agent:
         # Same " Did you mean `X`?" shape the CLI uses for unknown component names, inlined so the
         # compare package stays independent of `nemo_gym.cli`.
         close = difflib.get_close_matches(agent_name, run_file.agent_names, n=1)
         raise ConfigError(
-            f"Agent '{agent_name}' ({flag_label}) is not in '{run_file.aggregate_metrics_fpath}'. "
+            f"Agent '{agent_name}' is not in '{run_file.aggregate_metrics_fpath}'. "
             f"Available: {', '.join(run_file.agent_names)}." + (f" Did you mean `{close[0]}`?" if close else "")
         )
 
@@ -198,7 +169,7 @@ def resolve_agent_selections(
 ) -> Tuple[List[AgentSelection], List[str], Dict[str, List[str]]]:
     """Decide which agent to read from each side.
 
-    Precedence is most-specific-first: a per-side flag beats `--agent`, which beats the default
+    Precedence is most-specific-first: a per-side name beats `agent_name`, which beats the default
     full join over agent names common to every run. Returns the selections, any warnings, and the
     agents that were present but not compared (keyed by run label).
     """
@@ -207,19 +178,19 @@ def resolve_agent_selections(
     per_side_given = baseline_agent_name is not None or candidate_agent_names is not None
 
     if per_side_given:
-        baseline_agent = baseline_agent_name or agent_name or _sole_agent(baseline_file, "--baseline-agent")
-        _require_agent(baseline_file, baseline_agent, "--baseline-agent" if baseline_agent_name else "--agent")
+        baseline_agent = baseline_agent_name or agent_name or _sole_agent(baseline_file)
+        _require_agent(baseline_file, baseline_agent)
         candidates: List[str] = []
         for position, run_file in enumerate(candidate_files):
             explicit = candidate_agent_names[position] if candidate_agent_names else None
-            candidate_agent = explicit or agent_name or _sole_agent(run_file, "--candidate-agents")
-            _require_agent(run_file, candidate_agent, "--candidate-agents" if explicit else "--agent")
+            candidate_agent = explicit or agent_name or _sole_agent(run_file)
+            _require_agent(run_file, candidate_agent)
             candidates.append(candidate_agent)
         return [AgentSelection(baseline_agent, tuple(candidates))], warnings, skipped
 
     if agent_name:
         for run_file in (baseline_file, *candidate_files):
-            _require_agent(run_file, agent_name, "--agent")
+            _require_agent(run_file, agent_name)
         return [AgentSelection(agent_name, tuple(agent_name for _ in candidate_files))], warnings, skipped
 
     matched = set(baseline_file.entries_by_agent)
@@ -234,8 +205,8 @@ def resolve_agent_selections(
         raise ConfigError(
             "No agent name is present in every run, so there is nothing to compare.\n"
             f"{listing}\n"
-            "Pass --agent NAME to force one agent on both sides, or --baseline-agent / --candidate-agents "
-            "to pick a different agent per side."
+            "Set 'agent_name' to force one agent on both sides, or 'baseline_agent_name' / "
+            "'candidate_agent_names' to pick a different agent per side."
         )
 
     for run_file in (baseline_file, *candidate_files):
@@ -255,61 +226,39 @@ def resolve_agent_selections(
 def _derive_num_repeats(
     group_level_metrics: List[Dict[str, Any]],
     repeat_level_metrics: List[Dict[str, Any]],
-    num_agents_in_file: int,
 ) -> Optional[int]:
-    """Best available repeat count, most broadly-supported source first.
+    """How many repeats the run collected: the most any single task has.
 
-    `expected_num_rollouts` is present on every generation of the file, so it is tried first.
-    `repeat_level_metrics` is only usable when the file holds a single agent: aggregation writes a
-    hardcoded placeholder agent name there, so entries cannot be attributed to a real agent.
+    `expected_num_rollouts` is per task, and a partially recovered run leaves some tasks short of
+    the rest, so the max is the run's repeat count. `repeat_level_metrics` has exactly one entry
+    per repeat but is absent from single-repeat runs and from files written before it existed.
     """
-    expected = Counter(
+    expected = [
         group["expected_num_rollouts"]
         for group in group_level_metrics
         if isinstance(group.get("expected_num_rollouts"), int)
-    )
-    if expected:
-        return expected.most_common(1)[0][0]
-    if repeat_level_metrics and num_agents_in_file == 1:
-        return len(repeat_level_metrics)
-    rollout_counts = [
-        len(group["rollout_infos"]) for group in group_level_metrics if isinstance(group.get("rollout_infos"), list)
     ]
-    return max(rollout_counts) if rollout_counts else None
+    if expected:
+        return max(expected)
+    if repeat_level_metrics:
+        return len(repeat_level_metrics)
+    return None
 
 
-def build_loaded_run(run_file: RunFile, agent_name: str, *, label: str) -> LoadedRun:
+def build_loaded_run(run_file: RunFile, agent_name: str) -> LoadedRun:
     """Narrow a parsed run file to one agent."""
     entry = run_file.entries_by_agent[agent_name]
     agent_metrics = entry.get("agent_metrics") or {}
+    key_metrics = entry.get("key_metrics") or {}
     group_level_metrics = entry.get("group_level_metrics") or []
     repeat_level_metrics = entry.get("repeat_level_metrics") or []
 
     return LoadedRun(
-        role=run_file.role,
-        index=run_file.index,
-        label=label,
-        rollouts_jsonl_fpath=run_file.rollouts_jsonl_fpath,
-        aggregate_metrics_fpath=run_file.aggregate_metrics_fpath,
-        available_agent_names=tuple(run_file.agent_names),
         agent_name=agent_name,
         agent_metrics=agent_metrics,
-        key_metrics=entry.get("key_metrics") or {},
+        key_metrics=key_metrics,
         group_level_metrics=group_level_metrics,
-        repeat_level_metrics=repeat_level_metrics,
         num_tasks=len(group_level_metrics),
-        num_repeats=_derive_num_repeats(group_level_metrics, repeat_level_metrics, len(run_file.entries_by_agent)),
-        task_indices=frozenset(
-            group[TASK_INDEX_KEY_NAME] for group in group_level_metrics if TASK_INDEX_KEY_NAME in group
-        ),
-        has_rollout_infos=any(isinstance(group.get("rollout_infos"), list) for group in group_level_metrics),
+        num_repeats=_derive_num_repeats(group_level_metrics, repeat_level_metrics),
         has_repeat_cis=any(key.startswith(CI_LOW_PREFIX) for key in agent_metrics),
     )
-
-
-def run_labels(rollouts_paths: Sequence[Path]) -> List[str]:
-    """Short, unique display labels for the runs -- their parent directory names where that suffices."""
-    labels = [path.parent.name or path.stem for path in rollouts_paths]
-    if len(set(labels)) == len(labels):
-        return labels
-    return [str(Path(path.parent.parent.name) / (path.parent.name or path.stem)) for path in rollouts_paths]
