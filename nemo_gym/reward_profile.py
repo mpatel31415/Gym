@@ -40,10 +40,8 @@ from nemo_gym.global_config import (
     HISTOGRAM_STAT_NAME,
     MAX_PREFIX,
     MAX_STAT_NAME,
-    MEAN_ACROSS_REPEATS_PREFIX,
     MEAN_PREFIX,
     MEAN_STAT_NAME,
-    MEDIAN_ACROSS_REPEATS_PREFIX,
     MEDIAN_PREFIX,
     MEDIAN_STAT_NAME,
     MIN_PREFIX,
@@ -54,7 +52,6 @@ from nemo_gym.global_config import (
     P75_PREFIX,
     ROLLOUT_INDEX_KEY_NAME,
     ROLLOUT_INFOS_KEY_NAME,
-    SE_ACROSS_REPEATS_PREFIX,
     SEM_PREFIX,
     STAT_SEPARATOR,
     STD_DEV_ACROSS_RUNS_SUFFIX,
@@ -346,9 +343,12 @@ class RewardProfiler:
                 mean = float(col_data.mean())
                 std = float(col_data.std(ddof=1)) if n > 1 else 0.0
                 se = std / n**0.5
-                entry[f"{MEAN_ACROSS_REPEATS_PREFIX}{col}"] = mean
-                entry[f"{MEDIAN_ACROSS_REPEATS_PREFIX}{col}"] = float(col_data.median())
-                entry[f"{SE_ACROSS_REPEATS_PREFIX}{col}"] = se
+                entry[f"mean_across_repeats/{col}"] = mean
+                entry[f"median_across_repeats/{col}"] = float(col_data.median())
+                entry[f"std_across_repeats/{col}"] = std
+                entry[f"min_across_repeats/{col}"] = float(col_data.min())
+                entry[f"max_across_repeats/{col}"] = float(col_data.max())
+                entry[f"se_across_repeats/{col}"] = se
                 if ci := self._confidence_interval(mean, se, n):
                     (
                         entry[f"{CI_LOW_95_ACROSS_REPEATS_PREFIX}{col}"],

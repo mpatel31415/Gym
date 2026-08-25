@@ -647,6 +647,9 @@ class TestAggregateRepeatLevelMetrics:
         assert result[0]["mean_across_repeats/mean/reward"] == pytest.approx(0.75)
         assert result[0]["median_across_repeats/mean/reward"] == pytest.approx(0.75)
         assert result[0]["se_across_repeats/mean/reward"] == pytest.approx(0.0)
+        assert result[0]["std_across_repeats/mean/reward"] == pytest.approx(0.0)
+        assert result[0]["min_across_repeats/mean/reward"] == pytest.approx(0.75)
+        assert result[0]["max_across_repeats/mean/reward"] == pytest.approx(0.75)
 
     def test_known_values_across_repeats(self) -> None:
         """3 repeats with per-repeat means 1, 2, 3 -> mean=2, median=2, se=std([1,2,3])/sqrt(3)."""
@@ -661,6 +664,9 @@ class TestAggregateRepeatLevelMetrics:
         assert entry["mean_across_repeats/mean/reward"] == pytest.approx(2.0)
         assert entry["median_across_repeats/mean/reward"] == pytest.approx(2.0)
         assert entry["se_across_repeats/mean/reward"] == pytest.approx(1.0 / (3**0.5))
+        assert entry["std_across_repeats/mean/reward"] == pytest.approx(1.0)
+        assert entry["min_across_repeats/mean/reward"] == pytest.approx(1.0)
+        assert entry["max_across_repeats/mean/reward"] == pytest.approx(3.0)
 
     def test_skewed_repeats_median_differs_from_mean(self) -> None:
         """An outlier repeat pulls the mean away from the median, demonstrating both are useful."""
